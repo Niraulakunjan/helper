@@ -5,7 +5,7 @@ from accounts.views import (
     RegisterView, LoginView, ProfileView,
     ServiceListView, HelperListView, HelperDetailView, RegisterHelperView,
     BookingCreateView, MyBookingsView, BookingStatusUpdateView,
-    ChatHistoryView,
+    ChatHistoryView, SendMessageView, ConversationListView,
 )
 
 urlpatterns = [
@@ -28,6 +28,8 @@ urlpatterns = [
     path('api/bookings/mine/', MyBookingsView.as_view(), name='my-bookings'),
     path('api/bookings/<int:pk>/status/', BookingStatusUpdateView.as_view(), name='booking-status'),
 
-    # Chat
+    # Chat — order matters: specific paths before parameterised ones
+    path('api/chat/conversations/', ConversationListView.as_view(), name='chat-conversations'),
     path('api/chat/<int:other_id>/', ChatHistoryView.as_view(), name='chat-history'),
+    path('api/chat/<int:other_id>/send/', SendMessageView.as_view(), name='chat-send'),
 ]

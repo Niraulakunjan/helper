@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate, get_user_model
-from django.db.models import Q
+from django.db.models import Q, Max, Subquery, OuterRef
 from services.models import Service, Helper, Booking
 from chat.models import Message
 from .serializers import (
@@ -80,11 +80,21 @@ class RegisterHelperView(APIView):
         user = request.user
         user.role = 'helper'
         user.save()
+
         data = request.data.copy()
-        serializer = HelperSerializer(data=data)
+
+        # Check if helper profile exists — update or create
+        try:
+            helper_profile = user.helper_profile
+            serializer = HelperSerializer(helper_profile, data=data, partial=True)
+            is_new = False
+        except (AttributeError, Helper.DoesNotExist):
+            serializer = HelperSerializer(data=data)
+            is_new = True
+
         if serializer.is_valid():
             serializer.save(user=user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.data, status=status.HTTP_201_CREATED if is_new else status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -138,3 +148,60 @@ class ChatHistoryView(generics.ListAPIView):
             Q(sender=user, receiver_id=other_id) |
             Q(sender_id=other_id, receiver=user)
         ).order_by('timestamp')
+
+
+class SendMessageView(APIView):
+    """POST /api/chat/<other_id>/send/  — send a message to another user."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, other_id):
+        content = request.data.get('content', '').strip()
+        if not content:
+            return Response({'error': 'Content is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            receiver = User.objects.get(pk=other_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        msg = Message.objects.create(
+            sender=request.user,
+            receiver=receiver,
+            content=content,
+        )
+        return Response(MessageSerializer(msg).data, status=status.HTTP_201_CREATED)
+
+
+class ConversationListView(APIView):
+    """GET /api/chat/conversations/ — list all unique users this user has chatted with."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        # Find all unique other-user IDs from sent and received messages
+        sent_to       = Message.objects.filter(sender=user).values_list('receiver_id', flat=True).distinct()
+        received_from = Message.objects.filter(receiver=user).values_list('sender_id', flat=True).distinct()
+        other_ids     = set(list(sent_to) + list(received_from))
+
+        conversations = []
+        for other_id in other_ids:
+            other_user = User.objects.filter(pk=other_id).first()
+            if not other_user:
+                continue
+            last_msg = Message.objects.filter(
+                Q(sender=user, receiver_id=other_id) |
+                Q(sender_id=other_id, receiver=user)
+            ).order_by('-timestamp').first()
+
+            conversations.append({
+                'user': UserSerializer(other_user).data,
+                'last_message': last_msg.content if last_msg else '',
+                # Serialize timestamp as ISO string so JSON + sorting both work
+                'timestamp': last_msg.timestamp.isoformat() if last_msg and last_msg.timestamp else None,
+                'unread': Message.objects.filter(
+                    sender_id=other_id, receiver=user, is_read=False
+                ).count(),
+            })
+
+        # Sort by most recent first (None timestamps go to the end)
+        conversations.sort(key=lambda x: x['timestamp'] or '', reverse=True)
+        return Response(conversations)
